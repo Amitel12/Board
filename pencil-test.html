@@ -1,0 +1,454 @@
+<!doctype html>
+<html>
+<head>
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+<title>Pencil Test — Desktop + Mouse Integration (V2.1)</title>
+<style>
+  :root{ --panel-bg: rgba(255,255,255,.78); --panel-border: rgba(0,0,0,.10); --shadow: 0 14px 40px rgba(0,0,0,.12); --text:#222; --blue:#1e90ff; --bad:#fee2e2; --warn:#fef3c7; --good:#dcfce7; }
+  html,body{ margin:0; height:100%; background:#f7f7f7; overscroll-behavior:none; -webkit-user-select:none; user-select:none; -webkit-touch-callout:none; touch-action:none; font:14px system-ui,-apple-system,Segoe UI,Roboto,Helvetica,Arial; color:var(--text); }
+  canvas{ display:block; width:100vw; height:100vh; touch-action:none; background:#fff; }
+  #hud{ position:fixed; top:8px; left:8px; font:12px system-ui; background:#fff8; padding:6px 8px; border-radius:8px; pointer-events:none; z-index:5; }
+  .island{ position:fixed; left:50%; top:12px; transform:translateX(-50%); display:flex; align-items:center; gap:10px; padding:8px 10px; border-radius:999px; background:var(--panel-bg); border:1px solid var(--panel-border); box-shadow:var(--shadow); z-index:20; touch-action:manipulation; }
+  .chip{ display:flex; align-items:center; gap:8px; padding:8px 12px; border-radius:999px; background:#fff; border:1px solid rgba(0,0,0,.08); cursor:pointer; }
+  .chip .dot{ width:16px; height:16px; border-radius:50%; border:1px solid rgba(0,0,0,.12); }
+  .chip .label{ font-variant-numeric:tabular-nums; }
+  .chip .chev{ font-size:12px; opacity:.65; }
+  .toggle{ display:flex; align-items:center; gap:6px; padding:8px 12px; border-radius:999px; background:#fff; border:1px solid rgba(0,0,0,.08); cursor:pointer; }
+  .toggle.active{ outline:2px solid #222; outline-offset:2px; }
+  .palette{ position:fixed; left:50%; top:64px; transform:translateX(-50%); z-index:19; background:var(--panel-bg); border:1px solid var(--panel-border); border-radius:16px; box-shadow:var(--shadow); padding:12px; display:none; touch-action:manipulation; }
+  .palette.show{ display:block; }
+  .row{ display:flex; align-items:center; gap:10px; margin:8px 4px; }
+  .label{ font-size:12px; opacity:.75; min-width:46px; }
+  .size-preview{ width:28px; height:28px; border-radius:50%; background:#fff; border:1px solid rgba(0,0,0,.10); display:grid; place-items:center; }
+  .dot-small{ width:10px; height:10px; border-radius:50%; }
+  input[type="range"]{ -webkit-appearance:none; appearance:none; width:220px; height:4px; background:linear-gradient(90deg,#e5e5e5,#cfcfcf); border-radius:999px; outline:none; }
+  input[type="range"]::-webkit-slider-thumb{ -webkit-appearance:none; width:18px; height:18px; border-radius:50%; background:#fff; border:1px solid rgba(0,0,0,.15); box-shadow:0 1px 2px rgba(0,0,0,.18); }
+  .swatches{ display:grid; grid-template-columns:repeat(10, 26px); gap:8px; padding-top:4px; }
+  .swatch{ width:26px; height:26px; border-radius:8px; border:1px solid rgba(0,0,0,.12); cursor:pointer; position:relative; }
+  .swatch.is-active{ outline:2px solid #222; outline-offset:2px; }
+  /* Popup menu */
+  .ctx{ position:fixed; z-index:30; display:none; background:#fff; border:1px solid var(--panel-border); box-shadow:var(--shadow); border-radius:12px; padding:6px; }
+  .ctx.show{ display:block; }
+  .ctx button{ display:block; width:100%; text-align:left; padding:8px 10px; background:#fff; border:none; border-radius:8px; font:14px system-ui; }
+  .ctx button:hover{ background:#f2f2f2; }
+  /* Realtime controls */
+  .rt{ position:fixed; right:8px; top:8px; z-index:25; background:var(--panel-bg); border:1px solid var(--panel-border); box-shadow:var(--shadow); padding:8px; border-radius:12px; display:flex; gap:6px; align-items:center; }
+  .rt input{ width:140px; padding:6px 8px; border:1px solid rgba(0,0,0,.12); border-radius:8px; background:#fff; }
+  .badge{ padding:4px 8px; border-radius:999px; font-size:12px; background:#eee; }
+  .status{ padding:4px 8px; border-radius:8px; font-size:12px; }
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<div id="hud">mode: —</div>
+
+<div class="island" id="island">
+  <button id="brushChip" class="chip" type="button" aria-expanded="false" aria-controls="palette">
+    <span id="brushDot" class="dot" style="background:#111"></span>
+    <span id="brushSizeText" class="label">2.0</span>
+    <span class="chev">▾</span>
+  </button>
+  <button id="eraserToggle" class="toggle" type="button" aria-pressed="false" title="Hit‑erase">
+    🩹 <span class="label">Hit‑erase</span>
+  </button>
+</div>
+
+<div id="palette" class="palette" role="dialog" aria-modal="false" aria-label="Brush controls">
+  <div class="row">
+    <div class="label">Size</div>
+    <div class="size-preview"><div id="sizeDot" class="dot-small"></div></div>
+    <input id="sizeRange" type="range" min="0.5" max="24" step="0.5" value="2">
+    <div id="sizeVal" class="label">2.0</div>
+  </div>
+  <div class="row" style="flex-direction:column; align-items:flex-start; margin-top:4px;">
+    <div class="label" style="opacity:.75">Colors</div>
+    <div id="swatches" class="swatches"></div>
+  </div>
+</div>
+
+<!-- Popup menu -->
+<div id="ctx" class="ctx" role="dialog" aria-modal="false">
+  <button id="dupBtn" type="button">Duplicate</button>
+  <button id="delBtn" type="button">Delete</button>
+</div>
+
+<!-- Realtime controls -->
+<div class="rt">
+  <span class="badge" id="rtState">offline</span>
+  <input id="roomInput" placeholder="room-id" />
+  <button id="connectBtn" type="button">Connect</button>
+  <span id="authStatus" class="status">auth: —</span>
+</div>
+
+<!-- Firebase compat builds -->
+<script src="https://www.gstatic.com/firebasejs/10.12.4/firebase-app-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.12.4/firebase-firestore-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.12.4/firebase-auth-compat.js"></script>
+<script>
+// ===================== Config =====================
+// If you have your own config, replace this object with your project's values from Firebase Console.
+// NOTE: storageBucket typically ends with ".appspot.com". The previous value used a different domain and isn't needed for Auth
+// but we correct it here to the common format.
+const FIREBASE_CONFIG = {
+  apiKey: "AIzaSyD9w8tcdiPlX8HveEXIg2F2SiTLxRp7AN0",
+  authDomain: "board-0001.firebaseapp.com",
+  projectId: "board-0001",
+  storageBucket: "board-0001.appspot.com",
+  messagingSenderId: "350268205788",
+  appId: "1:350268205788:web:d173331949eea0e52ee219",
+  measurementId: "G-EX97SPDZE6"
+};
+
+// Validate config early and loudly (helps avoid auth/configuration-not-found)
+function validateFirebaseConfig(cfg){
+  const required = ["apiKey","authDomain","projectId","appId"]; // minimal for Auth
+  const missing = required.filter(k=>!cfg || !cfg[k] || String(cfg[k]).trim()==="");
+  if(missing.length){
+    const msg = `Firebase config missing keys: ${missing.join(", ")}`;
+    console.error(msg, cfg);
+    document.getElementById('authStatus').textContent = 'auth: bad config';
+    document.getElementById('authStatus').style.background = 'var(--warn)';
+    throw new Error(msg);
+  }
+}
+
+try{ validateFirebaseConfig(FIREBASE_CONFIG); }catch(e){ /* Surface early; user must paste correct config */ }
+</script>
+
+<script>
+// ==============================================================
+// Desktop + Mouse/Pointer integration
+// ==============================================================
+const cvs = document.getElementById('c');
+const ctx  = cvs.getContext('2d', { alpha:false });
+const hud  = document.getElementById('hud');
+
+const island       = document.getElementById('island');
+const brushChip    = document.getElementById('brushChip');
+const paletteEl    = document.getElementById('palette');
+const brushDot     = document.getElementById('brushDot');
+const brushSizeTxt = document.getElementById('brushSizeText');
+const eraserBtn    = document.getElementById('eraserToggle');
+const sizeRange    = document.getElementById('sizeRange');
+const sizeVal      = document.getElementById('sizeVal');
+const sizeDot      = document.getElementById('sizeDot');
+const swatchesEl   = document.getElementById('swatches');
+const ctxMenu      = document.getElementById('ctx');
+const dupBtn       = document.getElementById('dupBtn');
+const delBtn       = document.getElementById('delBtn');
+const rtState      = document.getElementById('rtState');
+const roomInput    = document.getElementById('roomInput');
+const connectBtn   = document.getElementById('connectBtn');
+const authStatus   = document.getElementById('authStatus');
+
+[island, paletteEl, ctxMenu].forEach(el=>{
+  ['touchstart','touchmove','touchend','pointerdown','pointermove','pointerup','mousedown','mousemove','mouseup','wheel','click','contextmenu'].forEach(ev=>{
+    el.addEventListener(ev, e=>{ e.stopPropagation(); }, {passive:true});
+  });
+});
+
+let DPR = 1, raf = null; const cam = { scale: 1, tx: 0, ty: 0 }; const MIN_SCALE = 0.25, MAX_SCALE = 10;
+
+// Grid
+const GRID_SIZE = 28, GRID_BOLD_EVERY = 5; const GRID_LIGHT = 'rgba(0,0,0,0.08)', GRID_BOLD  = 'rgba(0,0,0,0.18)'; const GRID_MAX_LINES = 700;
+
+// Brush & strokes
+const PALETTE = ['#111111','#444444','#888888','#bbbbbb','#ffffff','#ff4757','#ff7f50','#ffa502','#ffd32a','#2ed573','#1e90ff','#3742fa','#a55eea','#e84393','#00cec9','#16a085','#8e44ad','#2c3e50'];
+const currentBrush = { w: 2, color: '#111111', mode: 'draw' };
+
+// SINGLE global state
+const strokes = []; const history = []; const redoStack = []; let currentStroke = null; let currentErasePath = null; let gestureRemoved = null;
+
+function sid(){ return (crypto.randomUUID ? crypto.randomUUID() : 'id_'+Math.random().toString(36).slice(2)); }
+
+let selectState = { active:false, start:null, end:null, shown:false };
+let selected = new Set();
+let moving = false; let moveStartWorld = null; let moveAccum = {dx:0,dy:0};
+
+let tapCandidate = null; let lastTapWorld = null; let lastTapScreen = null;
+
+const CAPTURE_MODE = 'overlap';
+
+// ---------- Utils ----------
+function scrToWorld(x,y){ return { x:(x-cam.tx)/cam.scale, y:(y-cam.ty)/cam.scale }; }
+function worldToScr(wx,wy){ return { x: wx*cam.scale + cam.tx, y: wy*cam.scale + cam.ty }; }
+function getXYFromClient(x,y){ const r=cvs.getBoundingClientRect(); return {x:x-r.left, y:y-r.top}; }
+function clamp(v,lo,hi){ return Math.max(lo, Math.min(hi, v)); }
+function requestRedraw(){ if(raf) return; raf = requestAnimationFrame(()=>{ raf=null; redrawAll(); }); }
+function computeBounds(pts, halfw){ let minx=Infinity,miny=Infinity,maxx=-Infinity,maxy=-Infinity; for(const p of pts){ if(p.x<minx)minx=p.x; if(p.x>maxx)maxx=p.x; if(p.y<miny)miny=p.y; if(p.y>maxy)maxy=p.y; } return { minx:minx-halfw, maxx:maxx+halfw, miny:miny-halfw, maxy:maxy+halfw }; }
+function boxesOverlap(a,b){ return !(a.maxx<b.minx || b.maxx<a.minx || a.maxy<b.miny || b.maxy<a.miny); }
+function rectFrom(a,b){ const x0=Math.min(a.x,b.x), y0=Math.min(a.y,b.y), x1=Math.max(a.x,b.x), y1=Math.max(a.y,b.y); return {x0,y0,x1,y1, minx:x0,miny:y0,maxx:x1,maxy:y1}; }
+function rectContains(r,p){ return p.x>=r.x0 && p.x<=r.x1 && p.y>=r.y0 && p.y<=r.y1; }
+function boxContainsRect(r, sb){ return sb.minx>=r.x0 && sb.maxx<=r.x1 && sb.miny>=r.y0 && sb.maxy<=r.y1; }
+
+// ---------- UI helpers ----------
+function togglePalette(force){ const show = force!==undefined ? force : !paletteEl.classList.contains('show'); paletteEl.classList.toggle('show', show); brushChip.setAttribute('aria-expanded', String(show)); }
+function rebuildSwatches(){ swatchesEl.innerHTML=''; PALETTE.forEach(hex=>{ const b=document.createElement('button'); b.type='button'; b.className='swatch'; b.style.background=hex; b.dataset.color = hex.toLowerCase(); b.title=hex; b.addEventListener('click', ()=>{ currentBrush.color=b.dataset.color; currentBrush.mode='draw'; eraserBtn.classList.remove('active'); eraserBtn.setAttribute('aria-pressed','false'); updateBrushUI(); }); swatchesEl.appendChild(b); }); updateActiveSwatch(); }
+function updateActiveSwatch(){ const cur = currentBrush.color.toLowerCase(); brushDot.style.background = cur; [...swatchesEl.children].forEach(el=>{ el.classList.toggle('is-active', (el.dataset.color||'').toLowerCase()===cur); }); }
+function updateBrushUI(){ sizeVal.textContent = currentBrush.w.toFixed(1); sizeRange.value = String(currentBrush.w); const d = Math.max(4, Math.min(22, currentBrush.w*1.4)); sizeDot.style.width = d+'px'; sizeDot.style.height=d+'px'; sizeDot.style.background = currentBrush.color; brushDot.style.background= currentBrush.color; brushSizeTxt.textContent = currentBrush.w.toFixed(1); updateActiveSwatch(); }
+sizeRange.addEventListener('input', ()=>{ currentBrush.w=parseFloat(sizeRange.value)||2; updateBrushUI(); });
+brushChip.addEventListener('click', ()=> togglePalette());
+eraserBtn.addEventListener('click', ()=>{ const active = eraserBtn.classList.toggle('active'); eraserBtn.setAttribute('aria-pressed', String(active)); currentBrush.mode = active ? 'hit-erase' : 'draw'; if(active) togglePalette(false); hud.textContent = active? 'mode: Hit‑erase' : 'mode: Pencil'; });
+addEventListener('pointerdown', (e)=>{ const path = e.composedPath ? e.composedPath() : []; if(path.includes(paletteEl) || path.includes(brushChip) || path.includes(island) || path.includes(ctxMenu)) return; togglePalette(false); hideCtx(); });
+addEventListener('keydown', (e)=>{ if(e.key==='['){ currentBrush.w = clamp(currentBrush.w-0.5, +sizeRange.min, +sizeRange.max); updateBrushUI(); } if(e.key===']'){ currentBrush.w = clamp(currentBrush.w+0.5, +sizeRange.min, +sizeRange.max); updateBrushUI(); } if(e.key==='e' || e.key==='E'){ eraserBtn.click(); } });
+
+// ---------- Resize ----------
+function resize(){ DPR = Math.max(1, devicePixelRatio||1); const r = cvs.getBoundingClientRect(); cvs.width  = Math.round(r.width  * DPR); cvs.height = Math.round(r.height * DPR); requestRedraw(); }
+addEventListener('resize', resize, {passive:true}); addEventListener('orientationchange', resize, {passive:true});
+
+// ---------- Grid underlay ----------
+function drawGridUnder(){ const prev = ctx.globalCompositeOperation; ctx.globalCompositeOperation = 'destination-over'; ctx.setTransform(DPR*cam.scale,0,0,DPR*cam.scale,DPR*cam.ty,DPR*cam.ty); ctx.setTransform(DPR*cam.scale,0,0,DPR*cam.scale,DPR*cam.tx,DPR*cam.ty);
+  const vw = cvs.width  / (DPR*cam.scale), vh = cvs.height / (DPR*cam.scale);
+  const left = -cam.tx / cam.scale, top  = -cam.ty / cam.scale; const right = left + vw, bottom = top + vh;
+  function counts(sp){ const sx=Math.floor(left/sp), ex=Math.ceil(right/sp); const sy=Math.floor(top/sp), ey=Math.ceil(bottom/sp); return {vx:ex-sx+1, hy:ey-sy+1}; }
+  let eff = GRID_SIZE; let {vx,hy} = counts(eff); while ((vx+hy) > GRID_MAX_LINES) { eff *= 2; ({vx,hy} = counts(eff)); }
+  ctx.lineCap='butt'; ctx.lineJoin='miter'; ctx.lineWidth = 1 / cam.scale;
+  const startX = Math.floor(left/eff) * eff, endX   = Math.ceil(right/eff) * eff;
+  const startY = Math.floor(top /eff) * eff, endY   = Math.ceil(bottom/eff) * eff;
+  for(let x=startX, i=Math.round(startX/eff); x<=endX; x+=eff, i++){
+    ctx.beginPath(); ctx.strokeStyle=(i%GRID_BOLD_EVERY===0)?GRID_BOLD:GRID_LIGHT; ctx.moveTo(x,startY); ctx.lineTo(x,endY); ctx.stroke();
+  }
+  for(let y=startY, j=Math.round(startY/eff); y<=endY; y+=eff, j++){
+    ctx.beginPath(); ctx.strokeStyle=(j%GRID_BOLD_EVERY===0)?GRID_BOLD:GRID_LIGHT; ctx.moveTo(startX,y); ctx.lineTo(endX,y); ctx.stroke();
+  }
+  ctx.setTransform(1,0,0,1,0,0); ctx.fillStyle='#fff'; ctx.fillRect(0,0,cvs.width,cvs.height); ctx.globalCompositeOperation = prev; }
+
+// ---------- Drawing ----------
+function drawInkStroke(s){ const pts=s.pts; if(!pts || pts.length===0) return; ctx.setTransform(DPR*cam.scale,0,0,DPR*cam.scale,DPR*cam.tx,DPR*cam.ty); ctx.lineCap='round'; ctx.lineJoin='round'; ctx.strokeStyle = s.color; const lw = Math.max(0.5, s.w / cam.scale); ctx.lineWidth = lw; if(pts.length===1){ const p=pts[0]; ctx.beginPath(); ctx.arc(p.x,p.y,(s.w*0.5)/cam.scale,0,Math.PI*2); ctx.fillStyle=s.color; ctx.fill(); return; } for(let i=0;i<pts.length-2;i++){ const p0=pts[i], p1=pts[i+1], p2=pts[i+2]; const m1={x:(p0.x+p1.x)/2, y:(p0.y+p1.y)/2}; const m2={x:(p1.x+p2.x)/2, y:(p1.y+p2.y)/2}; ctx.beginPath(); ctx.moveTo(m1.x,m1.y); ctx.quadraticCurveTo(p1.x,p1.y,m2.x,m2.y); ctx.stroke(); } }
+
+function drawSelection(){ if(!(selectState.shown && selectState.start && selectState.end)) return; const r = rectFrom(selectState.start, selectState.end); ctx.setTransform(DPR*cam.scale,0,0,DPR*cam.scale,DPR*cam.tx,DPR*cam.ty); ctx.save(); ctx.lineWidth = 1/ cam.scale; ctx.setLineDash([8,6]); ctx.strokeStyle = 'rgba(30,144,255,0.9)'; ctx.fillStyle = 'rgba(30,144,255,0.08)'; ctx.beginPath(); ctx.rect(r.x0,r.y0,r.x1-r.x0,r.y1-r.y0); ctx.fill(); ctx.stroke(); ctx.restore(); }
+
+function redrawAll(){ ctx.setTransform(1,0,0,1,0,0); ctx.clearRect(0,0,cvs.width,cvs.height); for(const s of strokes){ drawInkStroke(s); } if(currentStroke) drawInkStroke(currentStroke); drawSelection(); drawGridUnder(); }
+
+function pushPoint(obj, wx, wy){ obj.pts.push({x:wx,y:wy}); requestRedraw(); }
+
+// ---------- Erase helpers ----------
+function distPointSeg(p, a, b){ const vx=b.x-a.x, vy=b.y-a.y; const wx=p.x-a.x, wy=p.y-a.y; const c1=vx*wx + vy*wy; if(c1<=0) return Math.hypot(p.x-a.x, p.y-a.y); const c2=vx*vx + vy*vy; if(c2<=0) return Math.hypot(p.x-a.x, p.y-a.y); if(c1>=c2) return Math.hypot(p.x-b.x, p.y-b.y); const t=c1/c2; const projx=a.x + t*vx, projy=a.y + t*vy; return Math.hypot(p.x-projx, p.y-projy); }
+function segSegMinDist(a1,a2,b1,b2){ return Math.min( distPointSeg(a1,b1,b2), distPointSeg(a2,b1,b2), distPointSeg(b1,a1,a2), distPointSeg(b2,a1,a2) ); }
+function segBox(a,b,pad){ const minx=Math.min(a.x,b.x)-pad, maxx=Math.max(a.x,b.x)+pad, miny=Math.min(a.y,b.y)-pad, maxy=Math.max(a.y,b.y)+pad; return {minx,maxx,miny,maxy}; }
+function segHitsStroke(e1,e2, eW, stroke){ if(!stroke.pts || stroke.pts.length<2) return false; const tol = Math.max(0.35, 0.5*(stroke.w + eW) - 0.05); const ebox=segBox(e1,e2,tol); for(let j=0;j<stroke.pts.length-1;j++){ const s1=stroke.pts[j], s2=stroke.pts[j+1]; const sbox=segBox(s1,s2,stroke.w*0.5); if(!boxesOverlap(ebox,sbox)) continue; if(segSegMinDist(e1,e2,s1,s2) <= tol) return true; } return false; }
+function eraseBySegment(e1,e2,eW){ if(!e1||!e2) return []; const removed=[]; const ebox = segBox(e1,e2, eW*0.6 + 1); for(let i=strokes.length-1;i>=0;i--){ const s=strokes[i]; if(!s.bounds) s.bounds = computeBounds(s.pts, s.w*0.5); const sb = {minx:s.bounds.minx-eW, maxx:s.bounds.maxx+eW, miny:s.bounds.miny-eW, maxy:s.bounds.maxy+eW}; if(!boxesOverlap(ebox, sb)) continue; if(segHitsStroke(e1,e2, eW, s)){ removed.push(strokes.splice(i,1)[0]); } } if(removed.length){ requestRedraw(); } return removed; }
+function eraseAlong(prev, curr, eW){ const removedAll=[]; if(!prev) return removedAll; const dx=curr.x-prev.x, dy=curr.y-prev.y; const dist=Math.hypot(dx,dy); const step = Math.max(2, eW*0.6); const parts = Math.max(1, Math.ceil(dist/step)); let p = {x:prev.x, y:prev.y}; for(let k=1;k<=parts;k++){ const t = k/parts; const q = {x: prev.x + dx*t, y: prev.y + dy*t}; const removed = eraseBySegment(p,q,eW); if(removed.length) removedAll.push(...removed); p = q; } return removedAll; }
+
+// ---------- Move helpers ----------
+function translateStroke(s, dx, dy){ for(const p of s.pts){ p.x += dx; p.y += dy; } if(s.bounds){ s.bounds.minx += dx; s.bounds.maxx += dx; s.bounds.miny += dy; s.bounds.maxy += dy; } }
+function commitMove(dx,dy){ if(!dx && !dy) return; if(!selected.size) return; const list = Array.from(selected); history.push({type:'move', strokes:list, dx, dy}); redoStack.length=0; hud.textContent = 'Move'; publish({type:'move', ids:list.map(s=>s.id), dx, dy}); }
+function undoMove(act){ for(const s of act.strokes){ translateStroke(s, -act.dx, -act.dy); } requestRedraw(); }
+function redoMove(act){ for(const s of act.strokes){ translateStroke(s,  act.dx,  act.dy); } requestRedraw(); }
+
+// ---------- Duplicate/Delete helpers ----------
+function hideCtx(){ ctxMenu.classList.remove('show'); }
+function showCtxAt(xScr, yScr){ ctxMenu.style.left = Math.round(xScr + 8) + 'px'; ctxMenu.style.top  = Math.round(yScr + 8) + 'px'; ctxMenu.classList.add('show'); }
+function cloneStroke(s){ return { id: sid(), pts: s.pts.map(p=>({x:p.x,y:p.y})), w:s.w, color:s.color, bounds: s.bounds? {minx:s.bounds.minx, miny:s.bounds.miny, maxx:s.bounds.maxx, maxy:s.bounds.maxy}:null }; }
+function boundsOfSet(set){ let minx=Infinity,miny=Infinity,maxx=-Infinity,maxy=-Infinity; for(const s of set){ if(!s.bounds) s.bounds = computeBounds(s.pts, s.w*0.5); minx=Math.min(minx,s.bounds.minx); miny=Math.min(miny,s.bounds.miny); maxx=Math.max(maxx,s.bounds.maxx); maxy=Math.max(maxy,s.bounds.maxy); } return {x0:minx,y0:miny,x1:maxx,y1:maxy}; }
+function deleteByIndices(removed){ removed.sort((a,b)=>b.idx-a.idx).forEach(({idx})=>{ strokes.splice(idx,1); }); }
+function deleteSelection(){ if(!(selectState.shown)) return; const rect = rectFrom(selectState.start, selectState.end); const removed=[]; const removedIds=[]; for(let i=0;i<strokes.length;i++){ const s=strokes[i]; if(!s.bounds) s.bounds = computeBounds(s.pts, s.w*0.5); const pad = Math.max(0, s.w*0.5); const sb={minx:s.bounds.minx-pad, maxx:s.bounds.maxx+pad, miny:s.bounds.miny-pad, maxy:s.bounds.maxy+pad}; const hit = (CAPTURE_MODE==='contain') ? boxContainsRect(rect,sb) : boxesOverlap(rect,sb); if(hit){ removed.push({idx:i, stroke:s}); removedIds.push(s.id); } }
+  if(removed.length){ deleteByIndices(removed); history.push({type:'delete', removed}); redoStack.length=0; hud.textContent=`Deleted ${removed.length}`; publish({type:'delete', ids: removedIds}); }
+  selected.clear(); selectState={active:false,start:null,end:null,shown:false}; hideCtx(); requestRedraw(); }
+function duplicateSelection(){ if(!selected.size) return; const originals = Array.from(selected); const clones = originals.map(cloneStroke); strokes.push(...clones); selected.clear(); clones.forEach(s=>selected.add(s)); const b = boundsOfSet(selected); selectState.start={x:b.x0,y:b.y0}; selectState.end={x:b.x1,y:b.y1}; selectState.shown=true; history.push({type:'duplicate', clones}); redoStack.length=0; moving=true; hud.textContent='Duplicated — drag to place'; hideCtx(); requestRedraw(); publish({type:'duplicate', strokes: clones.map(s=>({id:s.id, w:s.w, color:s.color, pts:s.pts}))}); }
+
+dupBtn.addEventListener('click', ()=>{ duplicateSelection(); });
+delBtn.addEventListener('click', ()=>{ deleteSelection(); });
+
+// ---------- Touch (iOS stylus) ----------
+let drawing=false, activeId=null;
+function handleTouchStart(ev){ const t=[...ev.changedTouches].find(t=>t.touchType==='stylus'); if(!t) return; ev.preventDefault(); redoStack.length=0; drawing=true; activeId=t.identifier; const {x,y}=getXYFromClient(t.clientX,t.clientY); const wpt=scrToWorld(x,y); if(currentBrush.mode==='draw'){ currentStroke={id: sid(), pts:[], w: currentBrush.w, color: currentBrush.color}; pushPoint(currentStroke,wpt.x,wpt.y); hud.textContent='mode: Pencil'; } else { currentErasePath={pts:[], w: Math.max(0.5,currentBrush.w)}; gestureRemoved = new Set(); pushPoint(currentErasePath,wpt.x,wpt.y); hud.textContent='mode: Hit‑erase'; } }
+function handleTouchMove(ev){ if(!drawing) return; const t=[...ev.touches].find(tt=>tt.identifier===activeId); if(!t) return; ev.preventDefault(); const {x,y}=getXYFromClient(t.clientX,t.clientY); const wpt=scrToWorld(x,y); if(currentStroke){ pushPoint(currentStroke,wpt.x,wpt.y); } else if(currentErasePath){ const pts=currentErasePath.pts; const prev=pts[pts.length-1]; pushPoint(currentErasePath,wpt.x,wpt.y); const removed = eraseAlong(prev, {x:wpt.x,y:wpt.y}, currentErasePath.w); if(removed && removed.length){ for(const s of removed){ gestureRemoved.add(s); } } } }
+function handleTouchEnd(ev){ const ended=[...ev.changedTouches].find(tt=>tt.identifier===activeId); if(!ended) return; ev.preventDefault(); drawing=false; activeId=null; if(currentStroke && currentStroke.pts.length){ currentStroke.bounds = computeBounds(currentStroke.pts, currentStroke.w*0.5); strokes.push(currentStroke); history.push({type:'draw', stroke: currentStroke}); publish({type:'draw', stroke: {id:currentStroke.id, w:currentStroke.w, color:currentStroke.color, pts: currentStroke.pts}}); currentStroke=null; redoStack.length=0; requestRedraw(); return; } if(currentErasePath){ if(gestureRemoved && gestureRemoved.size){ const ids = Array.from(gestureRemoved).map(s=>s.id); history.push({type:'erase', strokes: Array.from(gestureRemoved)}); publish({type:'erase', ids}); redoStack.length=0; hud.textContent='Erase (batched)'; } currentErasePath=null; gestureRemoved=null; requestRedraw(); currentBrush.mode = 'draw'; eraserBtn.classList.remove('active'); eraserBtn.setAttribute('aria-pressed','false'); hud.textContent='mode: Pencil'; } }
+const isIOS = /iPad|iPhone|iPod/.test(navigator.platform) || (navigator.userAgent.includes('iPad') || (navigator.userAgent.includes('Mac') && 'ontouchend' in document)); if(isIOS){ cvs.addEventListener('touchstart', handleTouchStart, {passive:false}); cvs.addEventListener('touchmove', handleTouchMove, {passive:false}); cvs.addEventListener('touchend', handleTouchEnd, {passive:false}); cvs.addEventListener('touchcancel', handleTouchEnd, {passive:false}); }
+
+// ---------- Desktop Pointer/Mouse support ----------
+let pState = { down:false, id:null, kind:null, tool:null, mode:null, p0:null, last:null, pan:false };
+
+cvs.addEventListener('pointerdown', (e)=>{
+  if(e.pointerType==='touch') return; // handled by touch layer
+  const btn = e.button; // 0=left,1=middle,2=right
+  const pos = getXYFromClient(e.clientX, e.clientY);
+  const world = scrToWorld(pos.x,pos.y);
+  cvs.setPointerCapture(e.pointerId);
+  pState.down=true; pState.id=e.pointerId; pState.kind=e.pointerType; pState.p0=pos; pState.last=world; pState.mode=null; pState.pan=false;
+  hideCtx();
+
+  // Pan with middle button or Alt key
+  if(btn===1 || e.altKey){ pState.pan=true; hud.textContent='Pan'; return; }
+
+  // Selection: Shift + drag draws rectangle
+  if(e.shiftKey){ selectState.active=true; selectState.start=world; selectState.end=world; selectState.shown=true; hud.textContent='Capture…'; requestRedraw(); return; }
+
+  // If inside current selection and left click, start moving
+  if(selectState.shown){ const r = rectFrom(selectState.start, selectState.end); if(rectContains(r, world)){ moving=true; moveStartWorld=world; moveAccum={dx:0,dy:0}; hud.textContent='Move…'; return; } selected.clear(); selectState.shown=false; requestRedraw(); }
+
+  // Drawing or erasing
+  redoStack.length=0;
+  if(currentBrush.mode==='draw'){
+    currentStroke={id:sid(), pts:[], w: currentBrush.w, color: currentBrush.color};
+    pushPoint(currentStroke, world.x, world.y);
+    hud.textContent='mode: Pencil';
+  } else {
+    currentErasePath={pts:[], w: Math.max(0.5,currentBrush.w)};
+    gestureRemoved = new Set();
+    pushPoint(currentErasePath, world.x, world.y);
+    hud.textContent='mode: Hit‑erase';
+  }
+});
+
+cvs.addEventListener('pointermove', (e)=>{
+  if(e.pointerType==='touch' || !pState.down) return;
+  const pos = getXYFromClient(e.clientX, e.clientY);
+  const world = scrToWorld(pos.x,pos.y);
+
+  if(pState.pan){ // drag to pan
+    const prev = pState.p0; const dx = pos.x - prev.x; const dy = pos.y - prev.y; pState.p0 = pos; cam.tx += dx; cam.ty += dy; requestRedraw(); return; }
+
+  if(selectState.active){ selectState.end = world; selectState.shown = true; requestRedraw(); return; }
+
+  if(moving){ const dx=world.x - moveStartWorld.x; const dy=world.y - moveStartWorld.y; if(dx||dy){ for(const s of selected){ translateStroke(s, dx, dy); } if(selectState.shown){ selectState.start = {x:selectState.start.x+dx, y:selectState.start.y+dy}; selectState.end   = {x:selectState.end.x+dx,   y:selectState.end.y+dy}; } moveAccum.dx += dx; moveAccum.dy += dy; moveStartWorld = world; requestRedraw(); } return; }
+
+  if(currentStroke){ pushPoint(currentStroke, world.x, world.y); }
+  else if(currentErasePath){ const pts=currentErasePath.pts; const prev=pts[pts.length-1]; pushPoint(currentErasePath, world.x, world.y); const removed = eraseAlong(prev, world, currentErasePath.w); if(removed && removed.length){ for(const s of removed){ gestureRemoved.add(s); } }
+  }
+});
+
+cvs.addEventListener('pointerup', (e)=>{
+  if(e.pointerType==='touch') return; if(e.pointerId!==pState.id) return; pState.down=false; cvs.releasePointerCapture(e.pointerId);
+  const pos = getXYFromClient(e.clientX, e.clientY); const world = scrToWorld(pos.x,pos.y);
+
+  if(pState.pan){ pState.pan=false; return; }
+
+  if(selectState.active){ // finish capture
+    const r = rectFrom(selectState.start, selectState.end); selected.clear();
+    for(const s of strokes){ if(!s.bounds) s.bounds = computeBounds(s.pts, s.w*0.5); const pad = Math.max(0, s.w*0.5); const sb={minx:s.bounds.minx-pad, maxx:s.bounds.maxx+pad, miny:s.bounds.miny-pad, maxy:s.bounds.maxy+pad}; const hit=(CAPTURE_MODE==='contain')?boxContainsRect(r,sb):boxesOverlap(r,sb); if(hit) selected.add(s); }
+    selectState.active=false; selectState.shown=true; hud.textContent = selected.size?`Captured ${selected.size}`:'Captured 0'; return; }
+
+  if(moving){ moving=false; if(Math.abs(moveAccum.dx)>0 || Math.abs(moveAccum.dy)>0){ commitMove(moveAccum.dx, moveAccum.dy); } moveStartWorld=null; moveAccum={dx:0,dy:0}; return; }
+
+  if(currentStroke && currentStroke.pts.length){ currentStroke.bounds = computeBounds(currentStroke.pts, currentStroke.w*0.5); strokes.push(currentStroke); history.push({type:'draw', stroke: currentStroke}); publish({type:'draw', stroke:{id:currentStroke.id, w:currentStroke.w, color:currentStroke.color, pts: currentStroke.pts}}); currentStroke=null; redoStack.length=0; requestRedraw(); return; }
+
+  if(currentErasePath){ if(gestureRemoved && gestureRemoved.size){ const ids = Array.from(gestureRemoved).map(s=>s.id); history.push({type:'erase', strokes: Array.from(gestureRemoved)}); publish({type:'erase', ids}); redoStack.length=0; hud.textContent='Erase (batched)'; } currentErasePath=null; gestureRemoved=null; requestRedraw(); }
+});
+
+// Right‑click (context menu) inside selection opens popup
+cvs.addEventListener('contextmenu', (e)=>{
+  const pos = getXYFromClient(e.clientX, e.clientY); const w = scrToWorld(pos.x,pos.y);
+  if(selectState.shown){ const r = rectFrom(selectState.start, selectState.end); if(rectContains(r,w)){ e.preventDefault(); showCtxAt(pos.x, pos.y); }
+  }
+});
+
+// Wheel: pan (default). Ctrl+wheel zoom to cursor
+cvs.addEventListener('wheel', (e)=>{
+  const pos = getXYFromClient(e.clientX, e.clientY); const w = scrToWorld(pos.x,pos.y);
+  if(e.ctrlKey){ e.preventDefault(); const delta = -e.deltaY; const factor = Math.exp(delta * 0.0015); const newScale = clamp(cam.scale * factor, MIN_SCALE, MAX_SCALE); cam.tx = pos.x - newScale * w.x; cam.ty = pos.y - newScale * w.y; cam.scale = newScale; requestRedraw(); }
+  else{ // pan
+    cam.tx -= e.deltaX; cam.ty -= e.deltaY; requestRedraw();
+  }
+},{passive:false});
+
+// Double‑tap gestures for undo/redo kept for touch; desktop users can press Z/Y later if desired
+addEventListener('dblclick', e=> e.preventDefault(), {passive:false, capture:true});
+
+function rebuildBoundsAll(){ for(const s of strokes){ s.bounds = computeBounds(s.pts, s.w*0.5); } }
+function runTests(){
+  const results = [];
+  // 1) Transform roundtrip
+  const p={x:77.7,y:-42.42}; const s=worldToScr(p.x,p.y); const w=scrToWorld(s.x,s.y);
+  results.push({test:'roundtrip', pass: Math.abs(p.x-w.x)<1e-6 && Math.abs(p.y-w.y)<1e-6});
+  // 2) Overlap logic sanity
+  const A={minx:0,miny:0,maxx:10,maxy:10}, B={minx:5,miny:5,maxx:15,maxy:15}, C={minx:11,miny:11,maxx:20,maxy:20};
+  results.push({test:'boxesOverlap A-B', pass: boxesOverlap(A,B)===true});
+  results.push({test:'boxesOverlap A-C', pass: boxesOverlap(A,C)===false});
+  // 3) Firebase config keys present
+  const need=["apiKey","authDomain","projectId","appId"]; const miss = need.filter(k=>!FIREBASE_CONFIG[k]);
+  results.push({test:'firebase config keys', pass: miss.length===0});
+  console.table(results);
+}
+window.runTests = runTests;
+
+function init(){
+  if(location.protocol==='file:'){
+    console.warn('Running from file:// — some Firebase Auth features may not work. Prefer http://localhost or a static server.');
+  }
+  rebuildSwatches(); updateBrushUI(); resize();
+}
+init();
+
+// ================= Realtime (Firestore + Auth) =================
+let app=null, db=null, unsub=null; const clientId = sid(); let roomId=null; let lastSeen = null; let authReadyOnce=false; let authDisabled=false;
+function setRt(state){ rtState.textContent = state; rtState.style.background = state==='online' ? 'var(--good)' : (state==='connecting' ? 'var(--warn)' : '#eee'); }
+
+function ensureFirebase(){
+  if(!app){
+    try{
+      app = firebase.initializeApp(FIREBASE_CONFIG);
+      db  = firebase.firestore();
+      console.log('Firebase initialized');
+    }catch(err){
+      console.error('Firebase init failed', err);
+      throw err;
+    }
+  }
+}
+
+function startAnonAuth(){
+  return new Promise((resolve)=>{
+    if(authDisabled){ return resolve(null); }
+    const auth = firebase.auth();
+    const unsub = auth.onAuthStateChanged(u=>{ if(u){ authStatus.textContent='auth: signed in'; authStatus.style.background='var(--good)'; unsub(); resolve(u); } });
+    auth.signInAnonymously().catch((err)=>{
+      console.error('Anon auth failed', err);
+      // Handle common project misconfig quickly without blocking Firestore dev usage
+      if(err && err.code === 'auth/configuration-not-found'){
+        authStatus.textContent = 'auth: config not found';
+        authStatus.style.background = 'var(--warn)';
+        authDisabled = true; // continue without auth (requires open rules for dev)
+        resolve(null);
+      } else if(err && err.code === 'auth/operation-not-allowed'){
+        authStatus.textContent = 'auth: anon disabled';
+        authStatus.style.background = 'var(--warn)';
+        resolve(null);
+      } else {
+        authStatus.textContent = 'auth: error';
+        authStatus.style.background = 'var(--bad)';
+        resolve(null);
+      }
+    });
+  });
+}
+
+async function connect(){ if(unsub){ unsub(); unsub=null; }
+  roomId=(roomInput.value||'').trim(); if(!roomId){ alert('Enter room-id'); return; }
+  try{
+    setRt('connecting'); ensureFirebase();
+    // Try auth, but don't hard-fail if project isn't configured (dev mode)
+    await startAnonAuth();
+
+    // Warm start: pull existing actions (up to 5000)
+    const q = db.collection('boards').doc(roomId).collection('actions').orderBy('ts','asc').limit(5000);
+    const snap = await q.get(); strokes.length=0; snap.forEach(doc=>{ const a=doc.data(); applyRemoteAction(a,true); lastSeen=a.ts; }); requestRedraw();
+
+    // Live tail
+    unsub = db.collection('boards').doc(roomId).collection('actions').orderBy('ts','asc').where('ts','>', lastSeen||0).onSnapshot(ss=>{
+      ss.docChanges().forEach(ch=>{ if(ch.type==='added'){ const a=ch.doc.data(); if(a.clientId===clientId) return; applyRemoteAction(a,false); } });
+    }, (err)=>{
+      console.error('onSnapshot error', err);
+      alert('Realtime failed: '+err.message);
+      setRt('offline');
+    });
+
+    setRt('online');
+  }catch(err){ console.error(err); alert('Connect failed: '+err.message); setRt('offline'); }
+}
+
+function publish(action){ if(!db || !roomId) return; try{ const payload = Object.assign({ clientId, ts: Date.now() }, action); db.collection('boards').doc(roomId).collection('actions').add(payload); }catch(err){ console.error('publish failed', err); } }
+function idxById(id){ return strokes.findIndex(s=>s.id===id); }
+function applyRemoteAction(a){ if(a.type==='draw'){ if(idxById(a.stroke.id)===-1){ strokes.push({ id:a.stroke.id, w:a.stroke.w, color:a.stroke.color, pts:a.stroke.pts.slice(), bounds:null }); } }
+  else if(a.type==='erase' || a.type==='delete'){ const ids=a.ids||[]; for(let i=strokes.length-1;i>=0;i--){ if(ids.includes(strokes[i].id)) strokes.splice(i,1); } }
+  else if(a.type==='move'){ const {ids=[],dx=0,dy=0}=a; ids.forEach(id=>{ const i=idxById(id); if(i!==-1){ translateStroke(strokes[i],dx,dy); } }); }
+  else if(a.type==='duplicate'){ const arr=a.strokes||[]; arr.forEach(s=>{ if(idxById(s.id)===-1){ strokes.push({ id:s.id, w:s.w, color:s.color, pts:s.pts.slice(), bounds:null }); } }); }
+  if(selectState.shown){ const b = boundsOfSet(selected); if(isFinite(b.x0)){ selectState.start={x:b.x0,y:b.y0}; selectState.end={x:b.x1,y:b.y1}; } }
+  requestRedraw(); }
+
+connectBtn.addEventListener('click', connect);
+
+</script>
+</body>
+</html>
