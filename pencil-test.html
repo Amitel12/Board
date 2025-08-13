@@ -106,6 +106,8 @@
     measurementId:"G-EX97SPDZE6"
   };
   const RT={app:null,db:null,unsub:null,client:uuid(),room:null,lastSeen:0};
+  // Offline publish queue (stores actions while disconnected)
+  const PUBQ=[];
 
   /* ===== Utils ===== */
   const clamp=(v,a,b)=>Math.max(a,Math.min(b,v));
@@ -195,10 +197,38 @@
   function hasCfg(cfg){ return !!(cfg && cfg.apiKey && cfg.authDomain && cfg.projectId && cfg.appId); }
   async function ensureFirebase(){ if(!hasCfg(FIREBASE_CONFIG)){ badge(ui.authState,'auth: config-missing','#fecaca'); return false; }
     if(!RT.app) RT.app=firebase.initializeApp(FIREBASE_CONFIG);
-    try{ await firebase.auth().setPersistence(firebase.auth.Auth.Persistence.NONE); await firebase.auth().signInAnonymously(); badge(ui.authState,'auth: signed','#d1fae5'); }
-    catch(e){ badge(ui.authState,'auth: anon-disabled','#fde68a'); console.warn(e?.code||e); }
-    RT.db=firebase.firestore(); return true; }
-  function pub(action){ if(!RT.db||!RT.room) return; RT.db.collection('boards').doc(RT.room).collection('actions').add(Object.assign({clientId:RT.client,ts:Date.now()},action)).catch(e=>console.error('publish',e)); }
+    // Create Firestore instance early and enable offline persistence (multi-tab when possible)
+    RT.db=firebase.firestore();
+    try{
+      await RT.db.enablePersistence({synchronizeTabs:true});
+      badge(ui.authState,'persistence:on','#dbeafe');
+    }catch(e){
+      // If failed (e.g., private mode), continue without persistence
+      console.warn('persistence', e?.code||e);
+      badge(ui.authState,'persistence:off','#fee2e2');
+    }
+    try{
+      if(navigator.onLine){
+        await firebase.auth().setPersistence(firebase.auth.Auth.Persistence.NONE);
+        await firebase.auth().signInAnonymously();
+        badge(ui.authState,'auth: signed','#d1fae5');
+      }else{
+        badge(ui.authState,'auth: offline','#fde68a');
+      }
+    }catch(e){ badge(ui.authState,'auth: anon-disabled','#fde68a'); console.warn(e?.code||e); }
+    return true; }
+
+  function pub(action){
+    // If not connected, queue locally; service worker + IndexedDB will keep app usable
+    if(!RT.db || !RT.room || !navigator.onLine){
+      PUBQ.push(Object.assign({clientId:RT.client,ts:Date.now()},action));
+      return;
+    }
+    RT.db.collection('boards').doc(RT.room).collection('actions')
+      .add(Object.assign({clientId:RT.client,ts:Date.now()},action))
+      .catch(e=>{ console.error('publish',e); PUBQ.push(Object.assign({clientId:RT.client,ts:Date.now()},action)); });
+  }
+
   const idIndex=id=>S.strokes.findIndex(s=>s.id===id);
   function applyRemote(a){
     if(a.type==='draw'){
@@ -224,10 +254,26 @@
     }catch(err){ alert('Connect failed: '+(err.message||err)); badge(ui.rtState,'offline','#eee'); }
   }
   ui.connectBtn.onclick=connect;
+  // Flush any queued actions after we are online & connected
+  async function flushQueue(){ if(!RT.db||!RT.room||PUBQ.length===0||!navigator.onLine) return; const batch=[...PUBQ]; PUBQ.length=0; for(const a of batch){ try{ await RT.db.collection('boards').doc(RT.room).collection('actions').add(a); }catch(e){ console.warn('repub',e); PUBQ.push(a); } } }
+  addEventListener('online', ()=>{ badge(ui.rtState,'online?','#fde68a'); flushQueue(); reqDraw(); });
+  addEventListener('offline', ()=>{ badge(ui.rtState,'offline','#eee'); });
 
   /* ===== Pencil, Mouse, Touch ===== */
+
+  /*** NEW: Track last pointer initiator to block synthetic touches after Pencil ***/
+  let lastPointer = { type: null, t: 0 };
+  addEventListener('pointerdown', e => {
+    lastPointer = { type: e.pointerType || null, t: performance.now() };
+  }, { capture: true });
+  function shouldBlockTouchForPen(){
+    return S.pen.active || (lastPointer.type === 'pen' && (performance.now() - lastPointer.t) < 600);
+  }
+  /***************************************************************************/
+
   // Pencil
-  cvs.addEventListener('pointerdown', e=>{ if(e.pointerType!=='pen') return; e.preventDefault(); S.pen.active=true; clearTimeout(S.pen.timer); try{ if(cvs.setPointerCapture) cvs.setPointerCapture(e.pointerId); }catch(_){}
+  cvs.addEventListener('pointerdown', e=>{ if(e.pointerType!=='pen') return; e.preventDefault(); S.pen.active=true; clearTimeout(S.pen.timer); try{ if(cvs.setPointerCapture) cvs.setPointerCapture(e.pointerId); }catch(_){} });
+  cvs.addEventListener('pointerdown', e=>{ if(e.pointerType!=='pen') return; e.preventDefault();
     const p=getXY(e.clientX,e.clientY), w=scrToW(p.x,p.y); if((e.buttons&1)===0) return; (S.brush.mode==='draw'?beginStroke:beginErase)(w); setMode(S.brush.mode==='draw'?'draw':'erase'); reqDraw(); },{passive:false});
   cvs.addEventListener('pointermove', e=>{ if(e.pointerType!=='pen') return; e.preventDefault(); const events=(typeof e.getCoalescedEvents==='function')?e.getCoalescedEvents():[e]; for(const ev of events){ const p=getXY(ev.clientX,ev.clientY), w=scrToW(p.x,p.y); if(S.current.stroke) addPoint(w); if(S.current.erase) addErase(w); } reqDraw(); },{passive:false});
   function endPencil(e){ if(e){ try{ if(cvs.releasePointerCapture) cvs.releasePointerCapture(e.pointerId); }catch(_){} e.preventDefault(); }
@@ -265,25 +311,36 @@
   const LONG_MS=300, TOUCH_MENU_MS=450; let longT=null, menuT=null; const isStylus=(ev)=>[...(ev.touches||[])].some(t=>t.touchType==='stylus');
   function centroid(ts){ let x=0,y=0; for(const t of ts){x+=t.clientX;y+=t.clientY;} return {x:x/ts.length,y:y/ts.length}; }
   function dist(a,b){ return Math.hypot(a.x-b.x,a.y-b.y); }
+
   cvs.addEventListener('touchstart', ev=>{
     if(ev.touches.length===2||ev.touches.length===3){ g.startTouches=[...ev.touches].map(t=>({x:t.clientX,y:t.clientY,id:t.identifier})); g.startTime=Date.now(); g.isTap=true; return; }
-    if(isStylus(ev) || S.pen.active) return; // block while Pencil is around
+    // HARD BLOCK: if Pencil is active or just initiated, do not allow selection via touch
+    if (shouldBlockTouchForPen()) { ev.preventDefault(); return; }
     if(S.brush.mode!=='draw' || S.current.erase){ ev.preventDefault(); return; } // do not enter selection while erasing
+
     const t=ev.changedTouches[0], p=getXY(t.clientX,t.clientY), w=scrToW(p.x,p.y);
     if(S.sel.shown && S.sel.set.size){ const r=rect(S.sel.start,S.sel.end); if(rectHas(r,w)){ ev.preventDefault(); S.I.mode='moveSel'; S.I.w0=w; S.I.moving={dx:0,dy:0}; setMode('moveSel'); clearTimeout(menuT); menuT=setTimeout(()=>showMenu(p.x,p.y),TOUCH_MENU_MS); return; }}
     ev.preventDefault(); clearTimeout(longT); longT=setTimeout(()=>{ S.sel.active=true; S.sel.shown=true; S.sel.start=w; S.sel.end=w; setMode('selectRect'); reqDraw(); },LONG_MS);
   },{passive:false});
+
   cvs.addEventListener('touchmove', ev=>{
+    // BLOCK selection/move updates if Pencil is active or just initiated
+    if (shouldBlockTouchForPen()) { ev.preventDefault(); return; }
+
     if(g.isTap && g.startTouches.length===ev.touches.length){ for(let i=0;i<g.startTouches.length;i++){ const s=g.startTouches[i], c=[...ev.touches].find(t=>t.identifier===s.id); if(!c) continue; if(Math.abs(c.clientX-s.x)>20||Math.abs(c.clientY-s.y)>20){ g.isTap=false; break; } } }
     const ts=[...ev.touches];
     if(ts.length>=2 && g.startTouches.length===ts.length){ let moved=false; for(let i=0;i<g.startTouches.length;i++){ const s=g.startTouches[i], c=ts.find(t=>t.identifier===s.id); if(!c) continue; if(Math.abs(c.clientX-s.x)>30||Math.abs(c.clientY-s.y)>30){ moved=true; break; } }
-      if(moved){ const c=centroid(ts), a={x:ts[0].clientX,y:ts[0].clientY}, b={x:ts[1].clientX,y:ts[1].clientY}, d=dist(a,b)||20; S.pinch={ startScale:S.cam.scale, p0dist:Math.max(20,d), worldAtCent:scrToW(c.x,c.y) }; setMode('pan'); g.startTouches=[]; g.startTime=0; ev.preventDefault(); return; } }
-    if(S.pinch && ts.length>=2){ ev.preventDefault(); const a={x:ts[0].clientX,y:ts[1].clientY?ts[1].clientY:ts[0].clientY}; const b={x:ts[1].clientX||ts[0].clientX,y:ts[1].clientY||ts[0].clientY}; const d=dist(a,b), ratio=clamp((d||20)/S.pinch.p0dist,0.05,20); S.cam.scale=clamp(S.pinch.startScale*ratio,0.10,10); const c=centroid(ts); S.cam.tx=c.x-S.cam.scale*S.pinch.worldAtCent.x; S.cam.ty=c.y-S.cam.scale*S.pinch.worldAtCent.y; reqDraw(); return; }
+      if(moved){ const c=centroid(ts), a={x:ts[0].clientX,y:ts[0].clientY}, b={x:ts[1].clientX||ts[0].clientX,y:ts[1].clientY||ts[0].clientY}, d=dist(a,b)||20; S.pinch={ startScale:S.cam.scale, p0dist:Math.max(20,d), worldAtCent:scrToW(c.x,c.y) }; setMode('pan'); g.startTouches=[]; g.startTime=0; ev.preventDefault(); return; } }
+    if(S.pinch && ts.length>=2){ ev.preventDefault(); const a={x:ts[0].clientX,y:ts[0].clientY}; const b={x:ts[1].clientX||ts[0].clientX,y:ts[1].clientY||ts[0].clientY}; const d=dist(a,b), ratio=clamp((d||20)/S.pinch.p0dist,0.05,20); S.cam.scale=clamp(S.pinch.startScale*ratio,0.10,10); const c=centroid(ts); S.cam.tx=c.x-S.cam.scale*S.pinch.worldAtCent.x; S.cam.ty=c.y-S.cam.scale*S.pinch.worldAtCent.y; reqDraw(); return; }
     if(longT){ clearTimeout(longT); longT=null; }
     if(S.I.mode==='moveSel'){ ev.preventDefault(); clearTimeout(menuT); const t=ts[0], p=getXY(t.clientX,t.clientY), w=scrToW(p.x,p.y), dx=w.x-S.I.w0.x, dy=w.y-S.I.w0.y; if(dx||dy){ moveSelBy(dx,dy); S.I.w0=w; S.I.moving.dx+=dx; S.I.moving.dy+=dy; reqDraw(); } return; }
     if(S.sel.active){ ev.preventDefault(); const t=ts[0], p=getXY(t.clientX,t.clientY), w=scrToW(p.x,p.y); S.sel.end=w; reqDraw(); }
   },{passive:false});
+
   cvs.addEventListener('touchend', ev=>{
+    // BLOCK selection finalize if Pencil is active or just initiated
+    if (shouldBlockTouchForPen()) { ev.preventDefault(); return; }
+
     if(g.isTap && g.startTouches.length>=2 && ev.touches.length===0 && Date.now()-g.startTime<2500){ let moved=false; for(let i=0;i<g.startTouches.length;i++){ const s=g.startTouches[i], end=[...ev.changedTouches].find(t=>t.identifier===s.id); if(!end) continue; if(Math.abs(end.clientX-s.x)>20||Math.abs(end.clientY-s.y)>20){ moved=true; break; } }
       if(!moved){ if(g.startTouches.length===2) undo(); if(g.startTouches.length===3) redo(); } g.startTouches=[]; g.startTime=0; g.isTap=false; return; }
     g.startTouches=[]; g.startTime=0; g.isTap=false;
@@ -312,12 +369,51 @@
     const x=200,y=200,w0=scrToW(x,y), s0=S.cam.scale, tx=S.cam.tx, ty=S.cam.ty; S.cam.scale=clamp(S.cam.scale*1.2,0.10,10); S.cam.tx=x-S.cam.scale*w0.x; S.cam.ty=y-S.cam.scale*w0.y; const w1=scrToW(x,y); results.push(['zoom_cursor_fixed', Math.abs(w0.x-w1.x)<1e-9 && Math.abs(w0.y-w1.y)<1e-9]); S.cam.scale=s0; S.cam.tx=tx; S.cam.ty=ty;
     const far={id:'t',w:2,color:'#111',pts:[{x:1000,y:1000},{x:1010,y:1010}]}; far.bounds=withPad(baseBounds(far.pts),far.w*0.5); const r={x0:0,y0:0,x1:50,y1:50}; const sb={minx:far.bounds.minx,maxx:far.bounds.maxx,miny:far.bounds.miny,maxy:far.bounds.maxy}; const rbox={minx:r.x0,miny:r.y0,maxx:r.x1,maxy:r.y1}; results.push(['far_not_overlap', !boxesOverlap(rbox,sb)]);
     results.push(['pen_grace>=120ms', S.pen.GRACE>=120]);
+    // NEW: publishing queues when offline/unconfigured
+    const q0=PUBQ.length; pub({type:'draw',stroke:{id:'temp',w:1,color:'#000',pts:[{x:0,y:0},{x:1,y:1}]}}); results.push(['pub_offline_queue', PUBQ.length===q0+1]);
+    // NEW: applyRemote draw is idempotent
+    const beforeCount=S.strokes.length; applyRemote({type:'draw',stroke:{id:'__test__',w:2,color:'#111',pts:[{x:0,y:0},{x:2,y:2}]}}); const afterOnce=S.strokes.length; applyRemote({type:'draw',stroke:{id:'__test__',w:2,color:'#111',pts:[{x:0,y:0},{x:2,y:2}]}}); const afterTwice=S.strokes.length; results.push(['applyRemote_idempotent', afterOnce===afterTwice]); if(afterTwice>beforeCount){ const idx=S.strokes.findIndex(s=>s.id==='__test__'); if(idx!==-1) S.strokes.splice(idx,1); }
+    // NEW: env supports service workers (or not) — just a boolean check
+    results.push(['sw_possible_boolean', 'serviceWorker' in navigator]);
+    // NEW: flushQueue exists
+    results.push(['flushQueue_exists', typeof flushQueue==='function']);
+    // NEW: pencil guard logic sanity
+    results.push(['shouldBlockTouch_idle_false', !shouldBlockTouchForPen()]);
+    lastPointer={type:'pen',t:performance.now()}; results.push(['shouldBlockTouch_recent_pen_true', shouldBlockTouchForPen()]);
     console.table(results.map(([name,pass,extra])=>({test:name, pass, extra:extra||''})));
     return results.every(r=>r[1]); }
   window.runTests=runTests;
 
   /* ===== Init ===== */
-  function init(){ buildSwatches(); updBrushUI(); resize(); try{ cvs.style.touchAction='none'; }catch(_){} addEventListener('resize',resize,{passive:true}); addEventListener('orientationchange',resize,{passive:true}); }
+  function init(){
+    buildSwatches();
+    updBrushUI();
+    resize();
+    try{ cvs.style.touchAction='none'; }catch(_){/* ignore */}
+    addEventListener('resize',resize,{passive:true});
+    addEventListener('orientationchange',resize,{passive:true});
+    // Update RT badge initially based on connectivity
+    badge(ui.rtState, navigator.onLine? 'online?':'offline', navigator.onLine? '#fde68a':'#eee');
+    // Register a tiny Service Worker (inline) to cache the app shell for true offline loads
+    if('serviceWorker' in navigator){
+      const swCode = `const CACHE='board-v1';
+self.addEventListener('install',e=>{e.waitUntil(caches.open(CACHE).then(c=>c.addAll(['./'])))});
+self.addEventListener('activate',e=>{e.waitUntil(caches.keys().then(keys=>Promise.all(keys.filter(k=>k!==CACHE).map(k=>caches.delete(k)))))});
+self.addEventListener('fetch',e=>{
+  const url=new URL(e.request.url);
+  // Only handle GETs; prefer cache-first for same-origin (the app shell)
+  if(e.request.method!=='GET' || url.origin!==location.origin) return;
+  e.respondWith(
+    caches.match(e.request).then(res=> res || fetch(e.request).then(net=>{ const copy=net.clone(); caches.open(CACHE).then(c=>c.put(e.request, copy)).catch(()=>{}); return net; }).catch(()=>res))
+  );
+});`;
+      try{
+        const blob=new Blob([swCode],{type:'text/javascript'});
+        const url=URL.createObjectURL(blob);
+        navigator.serviceWorker.register(url).catch(console.warn);
+      }catch(e){ console.warn('sw',e); }
+    }
+  }
   init();
 })();
 </script>
